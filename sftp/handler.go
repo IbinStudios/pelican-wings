@@ -35,6 +35,27 @@ type Handler struct {
 	ro          bool
 }
 
+func isGitTokenFile(path string) bool {
+	cleanPath := filepath.Clean(path)
+	
+	// Check for exact match of .git/tokens file
+	if strings.HasSuffix(cleanPath, ".git/tokens") || strings.HasSuffix(cleanPath, ".git\\tokens") {
+		return true
+	}
+	
+	// Check for .git/tokens.backup files as well (from our backup functionality)
+	if strings.HasSuffix(cleanPath, ".git/tokens.backup") || strings.HasSuffix(cleanPath, ".git\\tokens.backup") {
+		return true
+	}
+	
+	// Also check if the path contains .git/tokens anywhere in it
+	if strings.Contains(cleanPath, "/.git/tokens") || strings.Contains(cleanPath, "\\.git\\tokens") {
+		return true
+	}
+	
+	return false
+}
+
 // NewHandler returns a new connection handler for the SFTP server. This allows a given user
 // to access the underlying filesystem.
 func NewHandler(sc *ssh.ServerConn, srv *server.Server) (*Handler, error) {
@@ -77,6 +98,13 @@ func (h *Handler) Fileread(request *sftp.Request) (io.ReaderAt, error) {
 	if !h.can(PermissionFileReadContent) {
 		return nil, sftp.ErrSSHFxPermissionDenied
 	}
+	
+	// Block access to git token files
+	if isGitTokenFile(request.Filepath) {
+		h.logger.WithField("file", request.Filepath).Warn("blocked attempt to access git token file via SFTP")
+		return nil, sftp.ErrSSHFxPermissionDenied
+	}
+	
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if err := h.fs.IsIgnored(request.Filepath); err != nil {
@@ -98,6 +126,13 @@ func (h *Handler) Filewrite(request *sftp.Request) (io.WriterAt, error) {
 	if h.ro {
 		return nil, sftp.ErrSSHFxOpUnsupported
 	}
+	
+	// Block access to git token files
+	if isGitTokenFile(request.Filepath) {
+		h.logger.WithField("file", request.Filepath).Warn("blocked attempt to write git token file via SFTP")
+		return nil, sftp.ErrSSHFxPermissionDenied
+	}
+	
 	l := h.logger.WithField("source", request.Filepath)
 	// If the user doesn't have enough space left on the server it should respond with an
 	// error since we won't be letting them write this file to the disk.
@@ -144,12 +179,24 @@ func (h *Handler) Filewrite(request *sftp.Request) (io.WriterAt, error) {
 	return f, nil
 }
 
+
 // Filecmd hander for basic SFTP system calls related to files, but not anything to do with reading
 // or writing to those files.
 func (h *Handler) Filecmd(request *sftp.Request) error {
 	if h.ro {
 		return sftp.ErrSSHFxOpUnsupported
 	}
+	
+	// Block access to git token files for both source and target
+	if isGitTokenFile(request.Filepath) {
+		h.logger.WithField("file", request.Filepath).Warn("blocked attempt to modify git token file via SFTP")
+		return sftp.ErrSSHFxPermissionDenied
+	}
+	if request.Target != "" && isGitTokenFile(request.Target) {
+		h.logger.WithField("file", request.Target).Warn("blocked attempt to modify git token file via SFTP")
+		return sftp.ErrSSHFxPermissionDenied
+	}
+	
 	l := h.logger.WithField("source", request.Filepath)
 	if request.Target != "" {
 		l = l.WithField("target", request.Target)
@@ -281,8 +328,24 @@ func (h *Handler) Filelist(request *sftp.Request) (sftp.ListerAt, error) {
 			h.logger.WithField("source", request.Filepath).WithField("error", err).Error("error while listing directory")
 			return nil, sftp.ErrSSHFxFailure
 		}
-		return ListerAt(entries), nil
+		
+		// Filter out git token files from directory listings
+		filteredEntries := make([]os.FileInfo, 0, len(entries))
+		for _, entry := range entries {
+			fullPath := filepath.Join(request.Filepath, entry.Name())
+			if !isGitTokenFile(fullPath) && !isGitTokenFile(entry.Name()) {
+				filteredEntries = append(filteredEntries, entry)
+			}
+		}
+		
+		return ListerAt(filteredEntries), nil
 	case "Stat":
+		// Block stat requests on git token files
+		if isGitTokenFile(request.Filepath) {
+			h.logger.WithField("file", request.Filepath).Warn("blocked attempt to stat git token file via SFTP")
+			return nil, sftp.ErrSSHFxNoSuchFile
+		}
+		
 		st, err := h.fs.Stat(request.Filepath)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {

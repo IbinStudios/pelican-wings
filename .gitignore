@@ -52,3 +52,5 @@ debug
 *.pprof
 *.pdf
 pprof.*
+
+.vscode/

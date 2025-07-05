@@ -110,6 +110,7 @@ func Configure(m *wserver.Manager, client remote.Client) *gin.Engine {
 			files.DELETE("/pull/:download", middleware.RemoteDownloadEnabled(), deleteServerPullRemoteFile)
 
 			files.POST("/git-pull", postServerGitPull)
+			files.POST("/git-submodules", postServerGitSubmodules)
 		}
 
 		backup := server.Group("/backup")
